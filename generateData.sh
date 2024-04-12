@@ -53,7 +53,7 @@ echo "IdOperacion;FECHA_INICIO;FECHA_FIN;IdUsuario;IdTipoOperacion;NoOperacion;I
 
 for (( i=1; i<=$l; i++ )); do
     usuario=$(printf "USER%03d" $((RANDOM % u + 1)))
-    importe=$(($RANDOM % 1000 - 500))
+    importe=$(($RANDOM % 101 - 50))
     estado=$(($RANDOM % 2 == 0 ? "Correcto" : "Error"))
     echo "OPE00$i;02/02/2022 15:25;02/02/2022 15:50;$usuario;$t;$i;$importe€;$estado" >> $filename
 done
