@@ -1,0 +1,5 @@
+PATH_FILES=/Users/alvaro/archivosPrueba
+INVENTORY_FILE=consolidado.csv
+LOG_FILE=file_log.log
+NUM_PROCESOS=4
+SIMULATE_SLEEP=1
