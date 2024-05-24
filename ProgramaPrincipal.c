@@ -66,7 +66,7 @@ int main() {
     ArgumentosHilosConfiguracion args; //Creamos una estructura para almacenar los valores del archivo de configuración
 
     //Abrimos el archivo de configuración
-    archivo_config = fopen("/Users/alvaro/fp.txt", "r");
+    archivo_config = fopen("/Users/alvaro/fp.txt", "r"); //Cambiar ruta
     //Si no se puede abrir el archivo se mostrará un mensaje por pantalla
     if (archivo_config == NULL) {
         // Control de errores
