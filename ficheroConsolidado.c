@@ -1,18 +1,19 @@
-//Librerías
 #include <stdio.h>
-#include <string.h>
 #include <stdlib.h>
-#include <ctype.h>
-#include <time.h>
+#include <string.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <signal.h>
 #include <pthread.h>
 
-// Inclusión condicional de librerías específicas del sistema operativo para compatibilidad. Se ejecuta lo primero para comprobar su compatibilidad
+// Inclusión condicional de librerías específicas del sistema operativo para compatibilidad.
 #if defined(_WIN32)
     #include <windows.h>
 #elif defined(_WIN64)
     #include <windows.h>
-#elif defined(__CYGWIN__) && !defined(_WIN32)
+#elif defined(CYGWIN) && !defined(_WIN32)
     #include <windows.h>
 #else
     #include <sys/param.h>
@@ -21,15 +22,17 @@
     #endif
 #endif
 
-
 #define MAX_CARACTER 100
 #define MAX_OPERACIONES 1000
-#define MAX_USUARIOS 100  // Número máximo de usuarios a rastrear
-#define MAX_ERRORES 3     // Número máximo de errores permitidos antes de reportar
+#define MAX_USUARIOS 100
+#define MAX_ERRORES 3
+#define DEFAULT_SIZE_FP 2 * 1024 * 1024 // 2 MB
+#define SHM_NAME "/bank_operations_shm"
+#define DUMP_FILE "memory_dump.txt"
 
 typedef struct {
-    char idUsuario[13];  // ID del usuario
-    int conteoErrores;   // Conteo de errores por usuario
+    char idUsuario[13];
+    int conteoErrores;
 } UsuarioError;
 
 typedef struct {
@@ -44,7 +47,7 @@ typedef struct {
     char idTipoOperacion[13];
     int numOperacion;
     int importe;
-    char estado[11]; // Para soportar strings como "ERROR", "CORRECTO", "FINALIZADO"
+    char estado[11];
     int horaProceso;
     int minutoProceso;
 } tSucursal;
@@ -52,25 +55,27 @@ typedef struct {
 typedef struct {
     int NUM_PROCESOS;
     int SIMULATE_SLEEP;
-    char INVENTORY_FILE[20];    
+    char INVENTORY_FILE[20];
     char LOG_FILE[20];
     char PATH_FILES[45];
 } ArgumentosHilosConfiguracion;
 
-// Declaración de funciones
 void BorrarPantalla();
 void ErrorAcceso();
-int ContarLineas(char nombreArchivo[]); // Función implementada para contar las líneas del archivo
-void VisualizarArray(tSucursal listaMovimientos[]);
-void OrdenarConsolidado(tSucursal listaMovimientos[]);
-
-int NUMERO_LINEAS = 0;
-
+int ContarLineas(char nombreArchivo[]);
+void VisualizarArray(tSucursal listaMovimientos[], int num_movimientos);
+void OrdenarConsolidado(tSucursal listaMovimientos[], int num_movimientos);
 void* funcion_hilo1(void *arg);
 void* funcion_hilo2(void *arg);
 void* funcion_hilo3(void *arg);
 void* funcion_hilo4(void *arg);
 void* funcion_hilo5(void *arg);
+void handle_signal(int signal);
+
+int NUMERO_LINEAS = 0;
+int shm_fd;
+size_t shm_size = DEFAULT_SIZE_FP;
+void *shm_ptr;
 
 int main() {
     // Variables
@@ -90,8 +95,7 @@ int main() {
     ArgumentosHilosConfiguracion args;
 
     // Abrimos el archivo de configuración
-    archivo_config = fopen("/Users/alvaro/fp.txt", "r");
-    // Si no se puede abrir el archivo se mostrará un mensaje por pantalla
+    archivo_config = fopen("fp.txt", "r");
     if (archivo_config == NULL) {
         printf("Error: No se abrir el archivo de configuración.\n");
         exit(EXIT_FAILURE);
@@ -115,40 +119,45 @@ int main() {
             FinFich = feof(archivo_config);
             i++;
         }
-        fclose(archivo_config); // Se cierra el fichero de texto
-        
-        token = strtok(CadenaLeida, ";"); // Obtener el primer token
+        fclose(archivo_config);
+
+        token = strtok(CadenaLeida, ";");
         strcpy(args.PATH_FILES, token);
-        token = strtok(NULL, ";"); // Obtener el siguiente token
+        token = strtok(NULL, ";");
         strcpy(args.INVENTORY_FILE, token);
-        token = strtok(NULL, ";"); // Obtener el siguiente token
+        token = strtok(NULL, ";");
         strcpy(args.LOG_FILE, token);
-        token = strtok(NULL, ";"); // Obtener el siguiente token
+        token = strtok(NULL, ";");
         args.NUM_PROCESOS = atoi(token);
-        token = strtok(NULL, ";"); // Obtener el siguiente token
+        token = strtok(NULL, ";");
         args.SIMULATE_SLEEP = atoi(token);
-        token = strtok(NULL, ";"); // Obtener el siguiente token
+        token = strtok(NULL, ";");
     }
 
     NUMERO_LINEAS = ContarLineas(args.INVENTORY_FILE);
 
-    tSucursal listaMovimientos[NUMERO_LINEAS];
-
-    tSucursal mov;
-    pFichEnt = fopen(args.INVENTORY_FILE, "r");
-
-    // Si el fichero no se puede abrir, el programa entrará en esta parte del bucle
-    if (pFichEnt == NULL) {
-        // Control de errores
-        printf("Error al abrir el fichero %s\n", args.INVENTORY_FILE); // Se mostrará el mensaje de error por pantalla
-        return 0; // Como valor de la función se devuelve un cero
+    // Configurar memoria compartida
+    shm_fd = shm_open(SHM_NAME, O_CREAT | O_RDWR, 0666);
+    if (shm_fd == -1) {
+        perror("shm_open");
+        exit(EXIT_FAILURE);
     }
-    // Si se puede abrir el archivo, el programa entrará en esta parte del bucle
-    else {
+    ftruncate(shm_fd, shm_size);
+    shm_ptr = mmap(0, shm_size, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
+    if (shm_ptr == MAP_FAILED) {
+        perror("mmap");
+        exit(EXIT_FAILURE);
+    }
+
+    tSucursal *listaMovimientos = (tSucursal *)shm_ptr;
+
+    pFichEnt = fopen(args.INVENTORY_FILE, "r");
+    if (pFichEnt == NULL) {
+        printf("Error al abrir el fichero %s\n", args.INVENTORY_FILE);
+        return 0;
+    } else {
         FinFich = 0;
-        printf("\n");
         j = 0;
-        // Se realiza la lectura del fichero y se guarda la información en el programa.
         while (!FinFich) {
             Cadena[0] = '\0';
             fgets(Cadena, MAX_CARACTER, pFichEnt);
@@ -158,7 +167,7 @@ int main() {
 
             cpToken = strtok(Cadena, ";");
 
-            while (cpToken != NULL) { // Lee cada campo hasta el ;
+            while (cpToken != NULL) {
                 strcpy(listaMovimientos[j].idOperacion, cpToken);
                 cpToken = strtok(NULL, ";");
 
@@ -166,10 +175,8 @@ int main() {
                 cpToken = strtok(NULL, ";");
 
                 strcpy(horarioIn, cpToken);
-
                 sprintf(horaIn, "%c%c", horarioIn[0], horarioIn[1]);
                 sprintf(minutoIn, "%c%c", horarioIn[3], horarioIn[4]);
-
                 listaMovimientos[j].horaInicio = atoi(horaIn);
                 listaMovimientos[j].minutoInicio = atoi(minutoIn);
                 cpToken = strtok(NULL, ";");
@@ -178,10 +185,8 @@ int main() {
                 cpToken = strtok(NULL, ";");
 
                 strcpy(horarioFin, cpToken);
-
                 sprintf(horaFin, "%c%c", horarioFin[0], horarioFin[1]);
                 sprintf(minutoFin, "%c%c", horarioFin[3], horarioFin[4]);
-
                 listaMovimientos[j].horaFin = atoi(horaFin);
                 listaMovimientos[j].minutoFin = atoi(minutoFin);
                 cpToken = strtok(NULL, ";");
@@ -198,7 +203,6 @@ int main() {
                 listaMovimientos[j].importe = atoi(cpToken);
                 cpToken = strtok(NULL, ";");
 
-                // Cambiado para asignar una cadena a estado
                 strcpy(listaMovimientos[j].estado, cpToken);
                 cpToken = strtok(NULL, ";");
 
@@ -209,92 +213,76 @@ int main() {
             }
             FinFich = feof(pFichEnt);
         }
-        fclose(pFichEnt); // Se cierra el fichero de texto
+        fclose(pFichEnt);
     }
 
-    OrdenarConsolidado(listaMovimientos);
-    VisualizarArray(listaMovimientos);
+    OrdenarConsolidado(listaMovimientos, NUMERO_LINEAS);
+    VisualizarArray(listaMovimientos, NUMERO_LINEAS);
     printf("\n\n");
 
-    // Creamos los hilos
     pthread_t hilos[5];
+    pthread_create(&hilos[0], NULL, funcion_hilo1, (void *)listaMovimientos);
+    sleep(args.SIMULATE_SLEEP);
+    pthread_create(&hilos[1], NULL, funcion_hilo2, (void *)listaMovimientos);
+    sleep(args.SIMULATE_SLEEP);
+    pthread_create(&hilos[2], NULL, funcion_hilo3, (void *)listaMovimientos);
+    sleep(args.SIMULATE_SLEEP);
+    pthread_create(&hilos[3], NULL, funcion_hilo4, (void *)listaMovimientos);
+    sleep(args.SIMULATE_SLEEP);
+    pthread_create(&hilos[4], NULL, funcion_hilo5, (void *)listaMovimientos);
 
-    pthread_create(&hilos[0], NULL, funcion_hilo1, (void*)&listaMovimientos);
-    sleep(args.SIMULATE_SLEEP);
-    pthread_create(&hilos[1], NULL, funcion_hilo2, (void*)&listaMovimientos);
-    sleep(args.SIMULATE_SLEEP);
-    pthread_create(&hilos[2], NULL, funcion_hilo3, (void*)&listaMovimientos);
-    sleep(args.SIMULATE_SLEEP);
-    pthread_create(&hilos[3], NULL, funcion_hilo4, (void*)&listaMovimientos);
-    sleep(args.SIMULATE_SLEEP);
-    pthread_create(&hilos[4], NULL, funcion_hilo5, (void*)&listaMovimientos);
-
-    // Esperamos a que terminen los hilos de ser creados
     for (int i = 0; i < 5; i++) {
         pthread_join(hilos[i], NULL);
     }
 
+    // Configurar manejador de señales
+    struct sigaction sa;
+    sa.sa_handler = handle_signal;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sigaction(SIGINT, &sa, NULL);
+
+    // Mantener el programa en ejecución para permitir la captura de señales
+    pause();
+
     return 1;
 }
 
-//Hilos con los patrones
+void handle_signal(int signal) {
+    if (signal == SIGINT) {
+        printf("\nInterrupción recibida. Volcando datos de memoria compartida a fichero...\n");
 
-void* funcion_hilo1(void *arg) {
-    printf("PATRÓN 1: Transacciones repetidas en una hora concreta por usuario.\n");
-    tSucursal *movimientos = (tSucursal *) arg;
-    int conteoTransacciones[24][MAX_USUARIOS] = {0};  // Arreglo 2D para contar transacciones por hora y por usuario.
-    int usuarioIndex, hora;
-
-    // Inicializar conteos a cero para todos los usuarios y todas las horas
-    for (int i = 0; i < NUMERO_LINEAS; i++) {
-        usuarioIndex = atoi(movimientos[i].idUsuario); // Convierte el ID del usuario a un índice numérico si es posible.
-        hora = movimientos[i].horaInicio;
-        conteoTransacciones[hora][usuarioIndex]++;
-
-        if (conteoTransacciones[hora][usuarioIndex] > 5) {
-            printf("El usuario %s tiene más de 5 transacciones en la hora %d.\n", movimientos[i].idUsuario, hora);
+        FILE *file = fopen(DUMP_FILE, "w");
+        if (!file) {
+            perror("Error al abrir el fichero de volcado");
+            exit(EXIT_FAILURE);
         }
+
+        tSucursal *movimientos = (tSucursal *)shm_ptr;
+        for (int i = 0; i < NUMERO_LINEAS; i++) {
+            fprintf(file, "%s;%s;%02d:%02d;%s;%02d:%02d;%s;%s;%d;%d;%s;%02d:%02d\n",
+                    movimientos[i].idOperacion,
+                    movimientos[i].fechaInicio,
+                    movimientos[i].horaInicio, movimientos[i].minutoInicio,
+                    movimientos[i].fechaFin,
+                    movimientos[i].horaFin, movimientos[i].minutoFin,
+                    movimientos[i].idUsuario,
+                    movimientos[i].idTipoOperacion,
+                    movimientos[i].numOperacion,
+                    movimientos[i].importe,
+                    movimientos[i].estado,
+                    movimientos[i].horaProceso, movimientos[i].minutoProceso);
+        }
+
+        fclose(file);
+        printf("Datos volcados exitosamente a %s\n", DUMP_FILE);
+        munmap(shm_ptr, shm_size);
+        shm_unlink(SHM_NAME);
+        exit(EXIT_SUCCESS);
     }
-
-    pthread_exit(NULL);
 }
 
-
-
-void* funcion_hilo2(void *arg) {
-    printf("\nPATRÓN 2: Múltiples retiros en un mismo día\n");
-    printf("\n//NO FUNCIONA\n\n");
-    return NULL;
-}
-
-
-
-void* funcion_hilo3(void *arg) {
-    printf("PATRÓN 3: Errores repetidos por un usuario.\n");
-    printf("\n//NO FUNCIONA\n\n");
-    return NULL;
-}
-
-
-
-void* funcion_hilo4(void *arg){
-    printf("PATRÓN 4: Un usuario realiza una operación de cada tipo en un mismo día.\n");
-    printf("\n//NO FUNCIONA\n\n");
-    return NULL;
-}
-
-
-
-void* funcion_hilo5(void *arg) {
-    printf("PATRÓN 5: La cantidad de dinero retirado (-) en un día concreto es mayor que el dinero ingresado (+) ese mismo día.\n");
-    printf("\n//NO FUNCIONA\n\n");
-    return NULL;
-}
-
-
-
-//-------------------Funciones---------------------
-void VisualizarArray(tSucursal listaMovimientos[]){
+void VisualizarArray(tSucursal listaMovimientos[], int num_movimientos) {
     printf("REGISTRO DE SESIONES\n\n");
     printf("#\t");
     printf("idOpera\t\t");
@@ -310,105 +298,199 @@ void VisualizarArray(tSucursal listaMovimientos[]){
     printf("tiempoT\n");
     printf("-------------------------------------------------------------------------------------------------------------------------------------------------------------------\n");
 
-    for (int i = 0; i < NUMERO_LINEAS; ++i){
+    for (int i = 0; i < num_movimientos; ++i) {
         printf("%d\t", i);
         printf("%s\t\t", listaMovimientos[i].idOperacion);
-        printf("%s  ",  listaMovimientos[i].fechaInicio);
-        printf("%02d:%02d\t\t",  listaMovimientos[i].horaInicio, listaMovimientos[i].minutoInicio);
-        printf("%s  ",  listaMovimientos[i].fechaFin);
-        printf("%d:%d\t\t",  listaMovimientos[i].horaFin, listaMovimientos[i].minutoFin);
-        printf("%s\t\t",  listaMovimientos[i].idUsuario);
-        printf("%s\t",  listaMovimientos[i].idTipoOperacion);
-        printf("%d\t\t",  listaMovimientos[i].numOperacion);
-        printf("%d\t\t",  listaMovimientos[i].importe);
-        if (strcmp(listaMovimientos[i].estado, "Error") == 0) {
-            printf("%s\t\t",  listaMovimientos[i].estado);  
-        } else {
-            printf("%s\t",  listaMovimientos[i].estado);  
-        }
-        
-        printf("%02d:%02d\n",  listaMovimientos[i].horaProceso, listaMovimientos[i].minutoProceso);
-        
+        printf("%s  ", listaMovimientos[i].fechaInicio);
+        printf("%02d:%02d\t\t", listaMovimientos[i].horaInicio, listaMovimientos[i].minutoInicio);
+        printf("%s  ", listaMovimientos[i].fechaFin);
+        printf("%02d:%02d\t\t", listaMovimientos[i].horaFin, listaMovimientos[i].minutoFin);
+        printf("%s\t\t", listaMovimientos[i].idUsuario);
+        printf("%s\t\t", listaMovimientos[i].idTipoOperacion);
+        printf("%d\t\t", listaMovimientos[i].numOperacion);
+        printf("%d\t\t", listaMovimientos[i].importe);
+        printf("%s\t\t", listaMovimientos[i].estado);
+        printf("%02d:%02d\n", listaMovimientos[i].horaProceso, listaMovimientos[i].minutoProceso);
     }
 }
-void OrdenarConsolidado(tSucursal listaMovimientos[]){
-    int i,j,usuarioNumeroJ, usuarioNumeroI;
-    char usuarioNumeroIChar[4];
-    char usuarioNumeroJChar[4];
 
-    tSucursal Aux;
-
-    for(i=0;i<NUMERO_LINEAS;i++){
-        sprintf(usuarioNumeroIChar, "%c%c%c", listaMovimientos[i].idUsuario[4], listaMovimientos[i].idUsuario[5], listaMovimientos[i].idUsuario[6]);
-        usuarioNumeroI = atoi(usuarioNumeroIChar);
-        for(j=0;j<i;j++){
-            sprintf(usuarioNumeroJChar, "%c%c%c", listaMovimientos[j].idUsuario[4], listaMovimientos[j].idUsuario[5], listaMovimientos[j].idUsuario[6]);
-            usuarioNumeroJ = atoi(usuarioNumeroJChar);
-
-            if(usuarioNumeroI<usuarioNumeroJ){
-                Aux=listaMovimientos[i];
-                listaMovimientos[i]=listaMovimientos[j];
-                listaMovimientos[j]=Aux;
+void OrdenarConsolidado(tSucursal listaMovimientos[], int num_movimientos) {
+    tSucursal temp;
+    for (int i = 0; i < num_movimientos - 1; i++) {
+        for (int j = i + 1; j < num_movimientos; j++) {
+            if (strcmp(listaMovimientos[i].fechaInicio, listaMovimientos[j].fechaInicio) > 0 ||
+                (strcmp(listaMovimientos[i].fechaInicio, listaMovimientos[j].fechaInicio) == 0 &&
+                 listaMovimientos[i].horaInicio > listaMovimientos[j].horaInicio) ||
+                (strcmp(listaMovimientos[i].fechaInicio, listaMovimientos[j].fechaInicio) == 0 &&
+                 listaMovimientos[i].horaInicio == listaMovimientos[j].horaInicio &&
+                 listaMovimientos[i].minutoInicio > listaMovimientos[j].minutoInicio)) {
+                temp = listaMovimientos[i];
+                listaMovimientos[i] = listaMovimientos[j];
+                listaMovimientos[j] = temp;
             }
         }
     }
+}
 
-    //Ordenación por hora
-    for(i=0;i<NUMERO_LINEAS;i++){
-        for(j=0;j<i;j++){
-            if(strcmp(listaMovimientos[i].idUsuario, listaMovimientos[j].idUsuario) == 0 && listaMovimientos[i].horaInicio<listaMovimientos[j].horaInicio){
-                Aux=listaMovimientos[i];
-                listaMovimientos[i]=listaMovimientos[j];
-                listaMovimientos[j]=Aux;
-            }
+int ContarLineas(char nombreArchivo[]) {
+    FILE *archivo;
+    int contador = 0;
+    char caracter;
+
+    archivo = fopen(nombreArchivo, "r");
+    if (archivo == NULL) {
+        printf("No se pudo abrir el archivo.\n");
+        exit(1);
+    }
+
+    for (caracter = getc(archivo); caracter != EOF; caracter = getc(archivo)) {
+        if (caracter == '\n') {
+            contador++;
         }
     }
 
-    //Ordenación por minutos
-    for(i=0;i<NUMERO_LINEAS;i++){
-        for(j=0;j<i;j++){
-            if(strcmp(listaMovimientos[i].idUsuario, listaMovimientos[j].idUsuario) == 0 && listaMovimientos[i].horaInicio == listaMovimientos[j].horaInicio){
-                if(listaMovimientos[i].minutoInicio < listaMovimientos[j].minutoInicio){
-                    Aux=listaMovimientos[i];
-                    listaMovimientos[i]=listaMovimientos[j];
-                    listaMovimientos[j]=Aux;
+    fclose(archivo);
+    return contador;
+}
+
+void BorrarPantalla() {
+    #if defined(WIN32) || defined(WIN64) || defined(CYGWIN) && !defined(_WIN32)
+        system("cls");
+    #else
+        system("clear");
+    #endif
+}
+
+void ErrorAcceso() {
+    printf("\n\tError de acceso\n");
+    printf("\tPuede que no tengas permisos de lectura para este archivo.\n\n");
+}
+
+void* funcion_hilo1(void *arg) {
+    printf("PATRÓN 1: Transacciones repetidas en una hora concreta por usuario.\n");
+    tSucursal *movimientos = (tSucursal *) arg;
+    int conteoTransacciones[24][MAX_USUARIOS] = {0};  // Arreglo 2D para contar transacciones por hora y por usuario.
+    int usuarioIndex, hora;
+
+    for (int i = 0; i < NUMERO_LINEAS; i++) {
+        usuarioIndex = atoi(movimientos[i].idUsuario); // Convierte el ID del usuario a un índice numérico si es posible.
+        hora = movimientos[i].horaInicio;
+        conteoTransacciones[hora][usuarioIndex]++;
+
+        if (conteoTransacciones[hora][usuarioIndex] > 5) {
+            printf("El usuario %s tiene más de 5 transacciones en la hora %d.\n", movimientos[i].idUsuario, hora);
+        }
+    }
+
+    pthread_exit(NULL);
+}
+
+void* funcion_hilo2(void *arg) {
+    printf("PATRÓN 2: Múltiples retiros en un mismo día\n");
+
+    tSucursal *movimientos = (tSucursal *) arg;
+    int conteoRetiros[MAX_USUARIOS] = {0};
+
+    for (int i = 0; i < NUMERO_LINEAS; i++) {
+        if (strcmp(movimientos[i].idTipoOperacion, "Retiro") == 0 && strcmp(movimientos[i].fechaInicio, movimientos[i].fechaFin) == 0) {
+            int usuarioIndex = atoi(movimientos[i].idUsuario);
+            conteoRetiros[usuarioIndex]++;
+        }
+    }
+
+    int umbralRetiros = 3;
+
+    for (int i = 0; i < MAX_USUARIOS; i++) {
+        if (conteoRetiros[i] > umbralRetiros) {
+            printf("El usuario %d ha realizado %d retiros en un día.\n", i, conteoRetiros[i]);
+        }
+    }
+
+    pthread_exit(NULL);
+}
+
+void* funcion_hilo3(void *arg) {
+    printf("PATRÓN 3: Errores repetidos por un usuario.\n");
+
+    tSucursal *movimientos = (tSucursal *) arg;
+    int conteoErrores[MAX_USUARIOS] = {0};
+
+    for (int i = 0; i < NUMERO_LINEAS; i++) {
+        if (strcmp(movimientos[i].estado, "ERROR") == 0) {
+            int usuarioIndex = atoi(movimientos[i].idUsuario);
+            conteoErrores[usuarioIndex]++;
+        }
+    }
+
+    for (int i = 0; i < MAX_USUARIOS; i++) {
+        if (conteoErrores[i] > MAX_ERRORES) {
+            printf("Usuario %d: %d errores\n", i, conteoErrores[i]);
+        }
+    }
+
+    pthread_exit(NULL);
+}
+
+void* funcion_hilo4(void *arg) {
+    printf("PATRÓN 4: Un usuario realiza una operación de cada tipo en un mismo día.\n");
+
+    tSucursal *movimientos = (tSucursal *) arg;
+    int conteoTiposOperacion[MAX_USUARIOS][MAX_OPERACIONES] = {0};
+    int usuarioIndex, tipoOperacionIndex;
+
+    for (int i = 0; i < NUMERO_LINEAS; i++) {
+        usuarioIndex = atoi(movimientos[i].idUsuario);
+        tipoOperacionIndex = atoi(movimientos[i].idTipoOperacion);
+        conteoTiposOperacion[usuarioIndex][tipoOperacionIndex]++;
+    }
+
+    for (int i = 0; i < MAX_USUARIOS; i++) {
+        for (int j = 0; j < MAX_OPERACIONES; j++) {
+            if (conteoTiposOperacion[i][j] > 0) {
+                for (int k = j + 1; k < MAX_OPERACIONES; k++) {
+                    if (conteoTiposOperacion[i][k] == 0) {
+                        printf("El usuario %d no ha realizado una operación de cada tipo en el mismo día.\n", i);
+                        break;
+                    }
                 }
+                break;
             }
         }
     }
 
+    pthread_exit(NULL);
 }
 
-//Función para contar las líneas del archivo
-int ContarLineas(char nombreArchivo[]){
-    FILE *archivo; //Creamos el puntere de tipo fichero
-    int numeroLineas = 0; //Creamos una variable que igualamos a cero, que la utilizaremos para almacenar el número de líneas que tiene el archivo
-    int ch = 0;
-    archivo = fopen(nombreArchivo, "r"); //Abrimos el archivo modo lectura
+void* funcion_hilo5(void *arg) {
+    printf("PATRÓN 5: La cantidad de dinero retirado (-) en un día concreto es mayor que el dinero ingresado (+) ese mismo día.\n");
 
-    //Comprobamos si es posible abrir el archivo
-    //En el caso de que no sea posible entrará por la primera rama del bucle
-    if(archivo == NULL){
-        // Control de errores
-    	printf("Error al acceder archivo\n");
-        return(1); //La función devolverá 1
-    }
-    //En el caso de que si sea posible abrir el archivo, entrará por esta rama del bucle
-    else{
-        //Siempre que el valor que devuelva la función fgetc sea distinta de EOF, quiere decir que no ha llegado al final del archivo
-        while((ch=fgetc(archivo)) != EOF){
-            //Si el valor el \n, quiere decir que hay un salto de línea
-            if(ch == '\n')
-                numeroLineas++; //Incrementamos la variable numeroLineas en 1
+    tSucursal *movimientos = (tSucursal *) arg;
+    int saldoDia[MAX_USUARIOS][MAX_CARACTER] = {0};
+    int usuarioIndex, diaIndex;
+
+    for (int i = 0; i < NUMERO_LINEAS; i++) {
+        usuarioIndex = atoi(movimientos[i].idUsuario);
+        diaIndex = atoi(movimientos[i].fechaInicio);
+        if (strcmp(movimientos[i].idTipoOperacion, "+") == 0) {
+            saldoDia[usuarioIndex][diaIndex] += movimientos[i].importe;
+        } else if (strcmp(movimientos[i].idTipoOperacion, "-") == 0) {
+            saldoDia[usuarioIndex][diaIndex] -= movimientos[i].importe;
         }
-        //Cuando llegue al final del archivo, lo cerramos
-        fclose(archivo);
     }
-    return(numeroLineas); //La función devuelve el número de líneas calculadas
-}
 
-void BorrarPantalla(){
-    printf("*********************************************************************\n");
-    printf("*                        Process Auditor                            *\n");
-    printf("*********************************************************************\n\n");
+    for (int i = 0; i < MAX_USUARIOS; i++) {
+        for (int j = 0; j < MAX_CARACTER; j++) {
+            if (saldoDia[i][j] < 0) {
+                for (int k = j + 1; k < MAX_CARACTER; k++) {
+                    if (saldoDia[i][k] > 0) {
+                        printf("El usuario %d tiene un saldo negativo mayor que el saldo positivo en algún día.\n", i);
+                        break;
+                    }
+                }
+                break;
+            }
+        }
+    }
+
+    pthread_exit(NULL);
 }
