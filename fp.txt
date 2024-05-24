@@ -1,5 +1,11 @@
-PATH_FILES=/Users/alvaro/archivosPrueba
+PATH_FILES=/home/rodri/SO-main/files_data
 INVENTORY_FILE=consolidado.csv
-LOG_FILE=file_log.log
+LOG_FILE=log.txt
 NUM_PROCESOS=4
-SIMULATE_SLEEP=1
+SIMULATE_SLEEP_MIN=1
+SIMULATE_SLEEP_MAX=4
+SUCURSAL1=/home/rodri/SO-main/files_data/Sucursal1
+SUCURSAL2=/home/rodri/SO-main/files_data/Sucursal2
+SUCURSAL3=/home/rodri/SO-main/files_data/Sucursal3
+SUCURSAL4=/home/rodri/SO-main/files_data/Sucursal4
+SIZE_FP=2097152
